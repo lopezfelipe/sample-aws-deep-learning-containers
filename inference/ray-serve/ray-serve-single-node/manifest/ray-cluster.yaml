@@ -1,0 +1,72 @@
+# Variables: ${NAMESPACE}, ${DLC_IMAGE}, ${RAY_CLUSTER_NAME}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${RAY_CLUSTER_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ray-serve
+  template:
+    metadata:
+      labels:
+        app: ray-serve
+    spec:
+      containers:
+        - name: ray-serve
+          image: ${DLC_IMAGE}
+          command:
+            - bash
+            - -c
+            - |
+              ray start --head --num-gpus=1 &
+              sleep 5
+              serve start --http-host=0.0.0.0 --http-port=8000
+              serve run qwen_serve:app --app-dir /app
+          ports:
+            - containerPort: 8000
+              name: serve
+          env:
+            - name: RAY_SERVE_HTTP_HOST
+              value: "0.0.0.0"
+            - name: TRANSFORMERS_CACHE
+              value: "/mnt/fsx/models"
+            - name: HF_HOME
+              value: "/mnt/fsx/models"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "1500m"
+              memory: "8Gi"
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "1"
+              memory: "6Gi"
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            failureThreshold: 10
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "2Gi"
+      nodeSelector:
+        role: gpu-worker
