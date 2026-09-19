@@ -1,14 +1,14 @@
 # Multi-Node Ray Serve on EKS
 
-Deploy a single large language model across **two GPU nodes** with Ray Serve on Amazon EKS, using AWS Deep Learning Containers. This sample demonstrates **prefill/decode (PD) disaggregation**: one node handles the prefill phase and the other handles decode, cooperating behind a single OpenAI-compatible endpoint.
+Deploy a single LLM across **two GPU nodes** with Ray Serve on Amazon EKS, using AWS DLCs. This sample demonstrates **prefill/decode (PD) disaggregation**: one node handles the prefill phase and the other handles decode, cooperating behind a single endpoint.
 
-Ray is a distributed compute framework, so most Ray Serve deployments that go beyond a single GPU are multi-node by nature. Common patterns include tensor/pipeline parallelism (shard a model too big for one GPU), data parallelism (replicate a model for throughput), and prefill/decode disaggregation (separating the two phases of inference onto different nodes).
+Ray is a distributed compute framework, so most Ray Serve deployments are multi-node by nature. Common patterns include tensor/pipeline parallelism (shard a model too big for one instance), data parallelism (replicate a model for throughput), and prefill/decode disaggregation (separating the two phases of inference onto different nodes).
 
 ## What this sample builds
 
 The scripts will deploy [`Qwen/Qwen3.5-9B`](https://huggingface.co/Qwen/Qwen3.5-9B) in 2 `g5.xlarge` worker nodes: one for prefill and one for decode. The prefill node builds the KV cache for the prompt and hands it to the decode node over [NIXL](https://docs.ray.io/en/latest/serve/llm/user-guides/prefill-decode.html), which generates the response. Each phase runs the full model on its own GPU and scales independently.
 
-The [ray-llm DLC](https://gallery.ecr.aws/deep-learning-containers) ships vLLM, Ray Serve LLM, and NIXL, and exposes an **OpenAI-compatible API** with no application code. The entire app is a block of YAML.
+The [ray-llm DLC](https://aws.github.io/deep-learning-containers/ray-llm/) ships vLLM, Ray Serve LLM, and NIXL, and exposes an **OpenAI-compatible API** with no application code. The entire app in this sample is a block of YAML.
 
 ## Architecture
 
@@ -18,11 +18,11 @@ The [ray-llm DLC](https://gallery.ecr.aws/deep-learning-containers) ships vLLM, 
 
 Install the following tools before running any scripts:
 
-- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) (with credentials configured)
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) with credentials configured
 - [eksctl](https://eksctl.io/installation/)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [helm](https://helm.sh/docs/intro/install/) (to install the KubeRay operator)
-- [envsubst](https://www.gnu.org/software/gettext/) (ships with `gettext`; used to render the manifest)
+- [helm](https://helm.sh/docs/intro/install/) to install the KubeRay operator
+- [envsubst](https://www.gnu.org/software/gettext/) is used to render the manifest
 
 Verify that your AWS credentials are active:
 
@@ -35,7 +35,7 @@ aws sts get-caller-identity
 ```
 ray-serve-multi-node/
       scripts/      # Deployment and teardown scripts for EKS, node group, KubeRay, and the RayService
-      manifest/     # KubeRay RayService manifest (the entire application)
+      manifest/     # KubeRay RayService manifest: the entire application
 ```
 
 ## Configuration
@@ -52,9 +52,9 @@ All scripts share a single configuration file: `scripts/env.sh`. Override any va
 | GPU_NODE_TYPE | g5.xlarge | GPU worker instance type |
 | GPU_NODE_COUNT | 2 | Number of GPU nodes (prefill + decode) |
 | GPU_NODEGROUP_NAME | gpu-workers | Name of the GPU node group |
-| DLC_IMAGE | 763104351884.dkr.ecr.${REGION}.amazonaws.com/ray:serve-llm-cuda-v1.0.2 | Ray Serve LLM DLC image |
+| DLC_IMAGE | 763104351884.dkr.ecr.${REGION}.amazonaws.com/ray:serve-llm-cuda-v1.0 | Ray Serve LLM DLC image |
 | KUBERAY_VERSION | 1.4.0 | KubeRay operator version |
-| RAY_VERSION | 2.56.1 | Ray version (must match the DLC) |
+| RAY_VERSION | 2.58.0 | Ray version |
 | RAY_SERVICE_NAME | ray-llm | Name of the RayService |
 | NAMESPACE | inference | Kubernetes namespace |
 | MODEL_ID | qwen3.5-9b | Model id exposed on the API |
@@ -121,7 +121,7 @@ Provisions the EKS cluster (VPC, OIDC, core add-ons) and a CPU **system** node g
 ./deploy_node_group.sh
 ```
 
-Creates the GPU node group. By default 2x `g5.xlarge` (1x A10G 24 GB each), labeled `role=gpu-worker` so the Ray workers target them via a `nodeSelector`. Runs in private subnets with no public IPs. 3-5 minutes.
+Creates the GPU node group. By default 2x `g5.xlarge`, labeled `role=gpu-worker` so the Ray workers target them via a `nodeSelector`. Runs in private subnets with no public IPs. 3-5 minutes.
 
 ### Step 3: Install the KubeRay operator
 
@@ -147,7 +147,7 @@ Renders `manifest/rayservice.yaml` with your image/model/naming variables and ap
 
 Shows the RayService state, the head + worker pods (with the node each landed on), and GPU capacity.
 
-## Invoke the model (OpenAI-compatible API)
+## Invoke the model
 
 Port-forward to the Serve endpoint. KubeRay creates a stable `<rayservice-name>-serve-svc` Service once the Serve app is healthy:
 

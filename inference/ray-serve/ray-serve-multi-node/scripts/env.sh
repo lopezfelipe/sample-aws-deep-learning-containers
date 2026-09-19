@@ -17,10 +17,10 @@ export GPU_NODE_TYPE=${GPU_NODE_TYPE:-"g5.xlarge"}
 export GPU_NODE_COUNT=${GPU_NODE_COUNT:-2}
 export GPU_NODEGROUP_NAME=${GPU_NODEGROUP_NAME:-"gpu-workers"}
 
-export DLC_IMAGE=${DLC_IMAGE:-"763104351884.dkr.ecr.${REGION}.amazonaws.com/ray:serve-llm-cuda-v1.0.2"}
+export DLC_IMAGE=${DLC_IMAGE:-"763104351884.dkr.ecr.${REGION}.amazonaws.com/ray:serve-llm-cuda-v1.0"}
 
 export KUBERAY_VERSION=${KUBERAY_VERSION:-"1.4.0"}
-export RAY_VERSION=${RAY_VERSION:-"2.56.1"}
+export RAY_VERSION=${RAY_VERSION:-"2.58.0"}
 export RAY_SERVICE_NAME=${RAY_SERVICE_NAME:-"ray-llm"}
 
 export MODEL_ID=${MODEL_ID:-"qwen3.5-9b"}
