@@ -121,19 +121,30 @@ create_new_cluster() {
     print_section "Step 1: Creating EKS Cluster"
     echo "This will take 15-20 minutes..."
 
-    local all_azs az_count
-    if ! all_azs=$(retry 5 8 aws ec2 describe-availability-zones --region "$REGION" \
-        --query 'AvailabilityZones[?State==`available`].ZoneName' --output json); then
+    local gpu_azs all_azs cluster_azs az_json
+    gpu_azs=$(get_gpu_capable_azs)
+    if [ -z "$gpu_azs" ]; then
+        print_error "No AZ in $REGION offers $GPU_NODE_TYPE. Choose a different region or instance type."
+        exit 1
+    fi
+    all_azs=$(retry 5 8 aws ec2 describe-availability-zones --region "$REGION" \
+        --query 'AvailabilityZones[?State==`available`].ZoneName' --output text | tr '\t' '\n' | sort -u)
+    if [ -z "$all_azs" ]; then
         print_error "Could not list availability zones in $REGION after retries. Check your AWS session and re-run."
         exit 1
     fi
-    az_count=$(retry 5 8 aws ec2 describe-availability-zones --region "$REGION" \
-        --query 'length(AvailabilityZones[?State==`available`])' --output text)
-    if [ -z "$az_count" ] || [ "$az_count" -lt 2 ]; then
-        print_error "Only found ${az_count:-0} available AZ(s) in $REGION ($all_azs). EKS requires at least 2. Choose a different region."
+    # Prefer GPU-capable AZs so the GPU node group always has a usable subnet.
+    cluster_azs="$gpu_azs"
+    if [ "$(echo "$cluster_azs" | wc -l | tr -d ' ')" -lt 2 ]; then
+        cluster_azs=$(printf '%s\n%s\n' "$gpu_azs" "$all_azs" | awk 'NF && !seen[$0]++' | head -2)
+    fi
+    if [ "$(echo "$cluster_azs" | wc -l | tr -d ' ')" -lt 2 ]; then
+        print_error "EKS requires at least 2 AZs in $REGION; found: $(echo $cluster_azs | tr '\n' ' ')"
         exit 1
     fi
-    print_success "Available AZs: $all_azs"
+    az_json=$(echo "$cluster_azs" | awk 'NF{printf "%s\"%s\"", (c++?",":""), $0}')
+    print_success "GPU-capable AZs: $(echo $gpu_azs | tr '\n' ' ')"
+    print_success "Cluster AZs: $(echo $cluster_azs | tr '\n' ' ')"
 
     local cluster_config
     cluster_config=$(mktemp)
@@ -146,7 +157,7 @@ metadata:
   region: $REGION
   version: "${K8S_VERSION}"
 
-availabilityZones: ${all_azs}
+availabilityZones: [${az_json}]
 
 vpc:
   clusterEndpoints:

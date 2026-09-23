@@ -3,7 +3,7 @@
 # Idempotent: safe to re-run if interrupted. To delete, use delete_node_group.sh.
 #
 # Usage: bash deploy_node_group.sh
-# Override: GPU_NODE_TYPE=g5.2xlarge GPU_NODE_COUNT=4 bash deploy_node_group.sh
+# Override: GPU_NODE_TYPE=g6.12xlarge GPU_AZ=sa-east-1b bash deploy_node_group.sh
 
 set -eo pipefail
 
@@ -43,6 +43,8 @@ echo "  Region:     $REGION"
 echo "  Node Group: $GPU_NODEGROUP_NAME"
 echo "  Instance:   $GPU_NODE_TYPE"
 echo "  Count:      $GPU_NODE_COUNT"
+echo "  EFA:        enabled"
+echo "  AZ:         ${GPU_AZ:-auto-discover}"
 echo
 
 read -p "Proceed? (y/N): " -n 1 -r
@@ -51,29 +53,50 @@ echo
 
 check_prerequisites
 
+GPU_AZ=$(resolve_gpu_az)
+print_success "GPU AZ: $GPU_AZ"
+
 print_section "Checking for Existing GPU Node Group"
 NODEGROUP_STATUS=$(get_nodegroup_status "$GPU_NODEGROUP_NAME")
 
 case "$NODEGROUP_STATUS" in
     NOT_FOUND)
         print_section "Creating GPU Node Group"
-        echo "Creating ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} node(s)..."
+        echo "Creating ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} node(s) in ${GPU_AZ}..."
         wait_for_no_active_update
-        eksctl create nodegroup \
-            --cluster="$CLUSTER_NAME" \
-            --region="$REGION" \
-            --name="$GPU_NODEGROUP_NAME" \
-            --node-type="$GPU_NODE_TYPE" \
-            --nodes="$GPU_NODE_COUNT" \
-            --nodes-min="$GPU_NODE_COUNT" \
-            --nodes-max="$GPU_NODE_COUNT" \
-            --node-labels="role=gpu-worker" \
-            --node-private-networking \
-            --managed
+
+        # efaEnabled has no eksctl CLI flag, so this needs a config file.
+        NODEGROUP_CONFIG=$(mktemp)
+        cat > "$NODEGROUP_CONFIG" << EOF
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${REGION}
+
+managedNodeGroups:
+  - name: ${GPU_NODEGROUP_NAME}
+    instanceType: ${GPU_NODE_TYPE}
+    desiredCapacity: ${GPU_NODE_COUNT}
+    minSize: ${GPU_NODE_COUNT}
+    maxSize: ${GPU_NODE_COUNT}
+    availabilityZones: ["${GPU_AZ}"]
+    privateNetworking: true
+    efaEnabled: true
+    # Model weights land on the node's EBS via the container overlay fs.
+    volumeSize: 200
+    labels:
+      role: gpu-worker
+EOF
+        eksctl create nodegroup -f "$NODEGROUP_CONFIG"
+        rm -f "$NODEGROUP_CONFIG"
         print_success "GPU node group created"
 
-        print_section "Verifying GPU Nodes"
-        kubectl get nodes -l role=gpu-worker || print_warning "Could not fetch nodes right now (transient?). The node group was created successfully above."
+        print_section "Verifying GPU Nodes + EFA"
+        kubectl get nodes -l role=gpu-worker \
+            -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu,EFA:.status.allocatable.vpc\.amazonaws\.com/efa' \
+            || print_warning "Could not fetch nodes right now (transient?). The node group was created successfully above."
         ;;
     ACTIVE)
         print_success "GPU node group '$GPU_NODEGROUP_NAME' already exists (ACTIVE)"

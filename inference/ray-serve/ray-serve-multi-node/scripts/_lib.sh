@@ -10,7 +10,8 @@ NC='\033[0m'
 print_section() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 print_success() { echo -e "${GREEN}✓ $1${NC}"; }
 print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
-print_error()   { echo -e "${RED}✗ $1${NC}"; }
+# stderr, so messages still surface from inside $( ) command substitution.
+print_error()   { echo -e "${RED}✗ $1${NC}" >&2; }
 
 retry() {
     local attempts="$1" delay="$2"
@@ -56,6 +57,32 @@ get_addon_status() {
 get_cf_stack_status() {
     _aws_status "does not exist" cloudformation describe-stacks \
         --stack-name "$1" --region "$REGION" --query "Stacks[0].StackStatus" --output text
+}
+
+get_gpu_capable_azs() {
+    retry 5 8 aws ec2 describe-instance-type-offerings --region "$REGION" \
+        --location-type availability-zone \
+        --filters "Name=instance-type,Values=${GPU_NODE_TYPE}" \
+        --query 'InstanceTypeOfferings[].Location' --output text | tr '\t' '\n' | sort -u
+}
+
+# EFA traffic cannot cross an AZ, so the GPU node group lives in exactly one.
+resolve_gpu_az() {
+    local capable
+    capable=$(get_gpu_capable_azs)
+    if [ -z "$capable" ]; then
+        print_error "No AZ in $REGION offers $GPU_NODE_TYPE. Pick another region or instance type."
+        exit 1
+    fi
+    if [ -n "$GPU_AZ" ]; then
+        if ! echo "$capable" | grep -qx "$GPU_AZ"; then
+            print_error "GPU_AZ='$GPU_AZ' does not offer $GPU_NODE_TYPE in $REGION. Available: $(echo $capable | tr '\n' ' ')"
+            exit 1
+        fi
+        echo "$GPU_AZ"
+        return 0
+    fi
+    echo "$capable" | head -1
 }
 
 wait_for_no_active_update() {

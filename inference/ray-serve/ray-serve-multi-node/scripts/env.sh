@@ -3,7 +3,7 @@
 # Usage: source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 export CLUSTER_NAME=${CLUSTER_NAME:-"eks-cluster"}
-export REGION=${REGION:-"us-east-2"}
+export REGION=${REGION:-"sa-east-1"}
 export K8S_VERSION=${K8S_VERSION:-"1.35"}
 export AWS_REGION="$REGION"
 export AWS_DEFAULT_REGION="$REGION"
@@ -12,10 +12,12 @@ export NAMESPACE=${NAMESPACE:-"inference"}
 export SYSTEM_NODE_TYPE=${SYSTEM_NODE_TYPE:-"m7i.xlarge"}
 export SYSTEM_NODE_COUNT=${SYSTEM_NODE_COUNT:-1}
 
-# g5 has no EFA; NIXL KV-cache transfer runs over TCP on ENA.
-export GPU_NODE_TYPE=${GPU_NODE_TYPE:-"g5.xlarge"}
+# Smallest g6 with EFA (1 interface). EFA cannot cross AZs, so the GPU node
+# group is pinned to a single AZ; GPU_AZ is auto-discovered when left empty.
+export GPU_NODE_TYPE=${GPU_NODE_TYPE:-"g6.8xlarge"}
 export GPU_NODE_COUNT=${GPU_NODE_COUNT:-2}
 export GPU_NODEGROUP_NAME=${GPU_NODEGROUP_NAME:-"gpu-workers"}
+export GPU_AZ=${GPU_AZ:-""}
 
 export DLC_IMAGE=${DLC_IMAGE:-"763104351884.dkr.ecr.${REGION}.amazonaws.com/ray:serve-llm-cuda-v1.0"}
 

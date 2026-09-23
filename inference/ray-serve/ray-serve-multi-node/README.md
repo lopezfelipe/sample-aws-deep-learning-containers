@@ -6,9 +6,9 @@ Ray is a distributed compute framework, so most Ray Serve deployments are multi-
 
 ## What this sample builds
 
-The scripts will deploy [`Qwen/Qwen3.5-9B`](https://huggingface.co/Qwen/Qwen3.5-9B) in 2 `g5.xlarge` worker nodes: one for prefill and one for decode. The prefill node builds the KV cache for the prompt and hands it to the decode node over [NIXL](https://docs.ray.io/en/latest/serve/llm/user-guides/prefill-decode.html), which generates the response. Each phase runs the full model on its own GPU and scales independently.
+The scripts will deploy [`Qwen/Qwen3.5-9B`](https://huggingface.co/Qwen/Qwen3.5-9B) in 2 `g6.8xlarge` worker nodes: one for prefill and one for decode. The prefill node builds the KV cache for the prompt and hands it to the decode node over [NIXL](https://docs.ray.io/en/latest/serve/llm/user-guides/prefill-decode.html), which generates the response, and that transfer rides **[EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html)** via NIXL's libfabric backend.
 
-The [ray-llm DLC](https://aws.github.io/deep-learning-containers/ray-llm/) ships vLLM, Ray Serve LLM, and NIXL, and exposes an **OpenAI-compatible API** with no application code. The entire app in this sample is a block of YAML.
+The [ray-llm DLC](https://aws.github.io/deep-learning-containers/ray-llm/) ships vLLM, Ray Serve LLM, NIXL, and the EFA stack (libfabric and aws-ofi-nccl), and exposes an **OpenAI-compatible API** with no application code. The entire app in this sample is a block of YAML.
 
 ## Architecture
 
@@ -45,13 +45,14 @@ All scripts share a single configuration file: `scripts/env.sh`. Override any va
 | Variable | Default | Description |
 | --- | --- | --- |
 | CLUSTER_NAME | eks-cluster | EKS cluster name |
-| REGION | us-east-2 | AWS region |
+| REGION | sa-east-1 | AWS region |
 | K8S_VERSION | 1.35 | Kubernetes version |
 | SYSTEM_NODE_TYPE | m7i.xlarge | Instance type for system/head nodes |
 | SYSTEM_NODE_COUNT | 1 | Number of system nodes |
-| GPU_NODE_TYPE | g5.xlarge | GPU worker instance type |
+| GPU_NODE_TYPE | g6.8xlarge | GPU worker instance type (smallest EFA-capable g6) |
 | GPU_NODE_COUNT | 2 | Number of GPU nodes (prefill + decode) |
 | GPU_NODEGROUP_NAME | gpu-workers | Name of the GPU node group |
+| GPU_AZ | _(auto)_ | AZ for the GPU node group; auto-discovered when empty |
 | DLC_IMAGE | 763104351884.dkr.ecr.${REGION}.amazonaws.com/ray:serve-llm-cuda-v1.0 | Ray Serve LLM DLC image |
 | KUBERAY_VERSION | 1.4.0 | KubeRay operator version |
 | RAY_VERSION | 2.58.0 | Ray version |
@@ -90,12 +91,23 @@ applications:
       prefill_config:
         model_loading_config: { model_id: qwen3.5-9b, model_source: Qwen/Qwen3.5-9B }
         engine_kwargs:
-          kv_transfer_config: { kv_connector: NixlConnector, kv_role: kv_both, engine_id: prefill }
+          max_model_len: 4096
+          kv_transfer_config:
+            kv_connector: NixlConnector
+            kv_role: kv_both
+            engine_id: prefill
+            # Routes the transfer over EFA; without it NIXL uses UCX at TCP speed
+            kv_connector_extra_config: { backends: ["LIBFABRIC"] }
         deployment_config: { num_replicas: 1 }
       decode_config:
         model_loading_config: { model_id: qwen3.5-9b, model_source: Qwen/Qwen3.5-9B }
         engine_kwargs:
-          kv_transfer_config: { kv_connector: NixlConnector, kv_role: kv_both, engine_id: decode }
+          max_model_len: 4096
+          kv_transfer_config:
+            kv_connector: NixlConnector
+            kv_role: kv_both
+            engine_id: decode
+            kv_connector_extra_config: { backends: ["LIBFABRIC"] }
         deployment_config: { num_replicas: 1 }
 ```
 
@@ -113,7 +125,7 @@ cd $CURRENT_DIR/ray-serve-multi-node/scripts
 ./deploy_cluster.sh
 ```
 
-Provisions the EKS cluster (VPC, OIDC, core add-ons) and a CPU **system** node group (`m7i.xlarge`) that runs system workloads, the KubeRay operator, and the Ray head. Nodes run in private subnets with outbound access through a NAT Gateway. Idempotent: safe to re-run if interrupted. 15-20 minutes on a fresh run.
+Provisions the EKS cluster (VPC, OIDC, core add-ons) and a CPU **system** node group (`m7i.xlarge`) that runs system workloads, the KubeRay operator, and the Ray head. Nodes run in private subnets with outbound access through a NAT Gateway. Cluster subnets are placed in the Availability Zones that actually offer `$GPU_NODE_TYPE`, so the GPU node group always has a usable subnet. Idempotent: safe to re-run if interrupted. 15-20 minutes on a fresh run.
 
 ### Step 2: Add GPU worker nodes
 
@@ -121,7 +133,7 @@ Provisions the EKS cluster (VPC, OIDC, core add-ons) and a CPU **system** node g
 ./deploy_node_group.sh
 ```
 
-Creates the GPU node group. By default 2x `g5.xlarge`, labeled `role=gpu-worker` so the Ray workers target them via a `nodeSelector`. Runs in private subnets with no public IPs. 3-5 minutes.
+Creates the GPU node group: 2x `g6.8xlarge` with EFA enabled, pinned to a single AZ, labeled `role=gpu-worker` so the Ray workers target them via a `nodeSelector`. Runs in private subnets with no public IPs. Enabling EFA also makes eksctl install the EFA device plugin, which advertises `vpc.amazonaws.com/efa` on each node. 3-5 minutes.
 
 ### Step 3: Install the KubeRay operator
 
@@ -176,6 +188,17 @@ curl --fail --silent --show-error \
     "temperature": 0.7
   }'
 ```
+
+## Verify EFA is being used
+
+NIXL falls back to a TCP-speed transport if it cannot use libfabric, without raising an error, so confirm the backend it picked:
+
+```bash
+WPOD=$(kubectl get pod -n inference -l ray.io/node-type=worker -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -n inference "$WPOD" -c ray-worker | grep -iE "libfabric|nixl.*backend|ucx"
+```
+
+`deploy_node_group.sh` already prints the `vpc.amazonaws.com/efa` count per node when it creates the group. For a cross-node bandwidth number, the DLC ships a prebuilt NCCL benchmark at `/usr/local/bin/all_reduce_perf`.
 
 ## Teardown (reverse order)
 

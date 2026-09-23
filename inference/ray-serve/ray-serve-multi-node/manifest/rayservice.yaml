@@ -21,8 +21,8 @@ spec:
               model_id: ${MODEL_ID}
               model_source: ${MODEL_SOURCE}
             engine_kwargs:
-              # Keeps KV cache + CUDA graph memory within the g5.xlarge budget
-              max_model_len: 1024
+              # Fits the measured KV cache on one 24 GB L4
+              max_model_len: 4096
               dtype: bfloat16
               gpu_memory_utilization: 0.90
               # Skips CUDA graph capture to reduce peak GPU memory
@@ -32,6 +32,9 @@ spec:
                 kv_connector: NixlConnector
                 kv_role: kv_both
                 engine_id: prefill
+                # NIXL defaults to UCX, which runs at TCP speed even on EFA
+                kv_connector_extra_config:
+                  backends: ["LIBFABRIC"]
             deployment_config:
               num_replicas: 1
           decode_config:
@@ -39,7 +42,7 @@ spec:
               model_id: ${MODEL_ID}
               model_source: ${MODEL_SOURCE}
             engine_kwargs:
-              max_model_len: 1024
+              max_model_len: 4096
               dtype: bfloat16
               gpu_memory_utilization: 0.90
               enforce_eager: true
@@ -48,6 +51,8 @@ spec:
                 kv_connector: NixlConnector
                 kv_role: kv_both
                 engine_id: decode
+                kv_connector_extra_config:
+                  backends: ["LIBFABRIC"]
             deployment_config:
               num_replicas: 1
   rayClusterConfig:
@@ -76,7 +81,7 @@ spec:
                 requests: { cpu: "2", memory: 8Gi }
               lifecycle:
                 preStop: { exec: { command: ["/bin/sh", "-c", "ray stop"] } }
-    # --- Worker pods: one GPU each, on the g5 GPU node group -----------------
+    # --- Worker pods: one GPU + one EFA interface each, single AZ ------------
     workerGroupSpecs:
       - groupName: gpu-workers
         replicas: 2
@@ -94,12 +99,8 @@ spec:
                 imagePullPolicy: Always
                 env:
                   - { name: HF_HOME, value: /home/ray/hf-cache }
-                  # NIXL/NCCL over TCP on ENA (g5 has no EFA)
-                  - { name: NCCL_DEBUG, value: INFO }
-                  - { name: NCCL_SOCKET_IFNAME, value: eth0 }
-                  # cuda_copy is required alongside tcp so NIXL can register
-                  # GPU memory for the KV-cache transfer.
-                  - { name: UCX_TLS, value: "tcp,cuda_copy" }
+                  # Do not add NCCL_SOCKET_IFNAME: the DLC auto-detects it.
+                  - { name: FI_PROVIDER, value: efa }
                   # Required by NIXL for hybrid Mamba/Gated-DeltaNet models
                   - { name: VLLM_SSM_CONV_STATE_LAYOUT, value: "DS" }
                   - name: VLLM_HOST_IP
@@ -107,12 +108,17 @@ spec:
                       fieldRef:
                         fieldPath: status.podIP
                 resources:
-                  limits:   { nvidia.com/gpu: "1", cpu: "3", memory: 12Gi }
-                  requests: { nvidia.com/gpu: "1", cpu: "2", memory: 8Gi }
+                  # Headroom above the ~18 GiB checkpoint lets the page cache
+                  # hold it: weight loading drops from ~145s to ~2s.
+                  limits:   { nvidia.com/gpu: "1", vpc.amazonaws.com/efa: "1", cpu: "16", memory: 64Gi }
+                  requests: { nvidia.com/gpu: "1", vpc.amazonaws.com/efa: "1", cpu: "8", memory: 32Gi }
+                securityContext:
+                  # NIXL registers CUDA VRAM with the EFA NIC; IPC_LOCK is not enough.
+                  privileged: true
                 volumeMounts:
                   - { name: shm, mountPath: /dev/shm }
                 lifecycle:
                   preStop: { exec: { command: ["/bin/sh", "-c", "ray stop"] } }
             volumes:
               - name: shm
-                emptyDir: { medium: Memory, sizeLimit: 4Gi }
+                emptyDir: { medium: Memory, sizeLimit: 8Gi }
