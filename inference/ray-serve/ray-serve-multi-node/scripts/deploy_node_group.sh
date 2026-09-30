@@ -94,6 +94,15 @@ EOF
         print_success "GPU node group created"
 
         print_section "Verifying GPU Nodes + EFA"
+        # The NVIDIA and EFA device plugins register shortly after the nodes
+        # join, so poll until every node advertises both before printing.
+        for _ in $(seq 1 30); do
+            advertised=$(kubectl get nodes -l role=gpu-worker \
+                -o jsonpath='{range .items[*]}{.status.allocatable.nvidia\.com/gpu}/{.status.allocatable.vpc\.amazonaws\.com/efa}{"\n"}{end}' \
+                2>/dev/null | grep -c '^[0-9][0-9]*/[0-9][0-9]*$' || true)
+            [ "${advertised:-0}" -ge "$GPU_NODE_COUNT" ] && break
+            sleep 10
+        done
         kubectl get nodes -l role=gpu-worker \
             -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu,EFA:.status.allocatable.vpc\.amazonaws\.com/efa' \
             || print_warning "Could not fetch nodes right now (transient?). The node group was created successfully above."

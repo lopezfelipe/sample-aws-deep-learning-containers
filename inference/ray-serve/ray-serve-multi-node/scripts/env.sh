@@ -2,7 +2,7 @@
 # env.sh - Single source of truth for all shared variables. No side effects.
 # Usage: source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-export CLUSTER_NAME=${CLUSTER_NAME:-"eks-cluster"}
+export CLUSTER_NAME=${CLUSTER_NAME:-"ray-llm-multinode"}
 export REGION=${REGION:-"sa-east-1"}
 export K8S_VERSION=${K8S_VERSION:-"1.35"}
 export AWS_REGION="$REGION"

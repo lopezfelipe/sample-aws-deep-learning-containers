@@ -44,7 +44,7 @@ All scripts share a single configuration file: `scripts/env.sh`. Override any va
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| CLUSTER_NAME | eks-cluster | EKS cluster name |
+| CLUSTER_NAME | ray-llm-multinode | EKS cluster name |
 | REGION | sa-east-1 | AWS region |
 | K8S_VERSION | 1.35 | Kubernetes version |
 | SYSTEM_NODE_TYPE | m7i.xlarge | Instance type for system/head nodes |
@@ -133,7 +133,7 @@ Provisions the EKS cluster (VPC, OIDC, core add-ons) and a CPU **system** node g
 ./deploy_node_group.sh
 ```
 
-Creates the GPU node group: 2x `g6.8xlarge` with EFA enabled, pinned to a single AZ, labeled `role=gpu-worker` so the Ray workers target them via a `nodeSelector`. Runs in private subnets with no public IPs. Enabling EFA also makes eksctl install the EFA device plugin, which advertises `vpc.amazonaws.com/efa` on each node. 3-5 minutes.
+Creates the GPU node group: 2x `g6.8xlarge` with EFA enabled, pinned to a single AZ, labeled `role=gpu-worker` so the Ray workers target them via a `nodeSelector`. Runs in private subnets with no public IPs. Enabling EFA also makes eksctl install the EFA device plugin, which advertises `vpc.amazonaws.com/efa` on each node. 5-20 minutes, longer on a first run.
 
 ### Step 3: Install the KubeRay operator
 
@@ -194,8 +194,11 @@ curl --fail --silent --show-error \
 NIXL falls back to a TCP-speed transport if it cannot use libfabric, without raising an error, so confirm the backend it picked:
 
 ```bash
-WPOD=$(kubectl get pod -n inference -l ray.io/node-type=worker -o jsonpath='{.items[0].metadata.name}')
-kubectl logs -n inference "$WPOD" -c ray-worker | grep -iE "libfabric|nixl.*backend|ucx"
+for POD in $(kubectl get pods -n inference -l ray.io/node-type=worker \
+             -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl exec -n inference "$POD" -c ray-worker -- \
+    grep -rhoE "Backend (LIBFABRIC|UCX) was instantiated" /tmp/ray/session_latest/logs/ 2>/dev/null
+done | sort | uniq -c
 ```
 
 `deploy_node_group.sh` already prints the `vpc.amazonaws.com/efa` count per node when it creates the group. For a cross-node bandwidth number, the DLC ships a prebuilt NCCL benchmark at `/usr/local/bin/all_reduce_perf`.
